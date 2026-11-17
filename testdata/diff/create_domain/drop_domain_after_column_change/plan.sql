@@ -1,0 +1,74 @@
+CREATE DOMAIN code_new AS text
+  CONSTRAINT code_new_check CHECK (VALUE ~ '^[a-z0-9]+$');
+
+CREATE TYPE hue_new AS ENUM (
+    'red',
+    'blue',
+    'green'
+);
+
+ALTER TABLE items ALTER COLUMN code DROP DEFAULT;
+
+ALTER TABLE items ALTER COLUMN code TYPE code_new USING code::code_new;
+
+ALTER TABLE items ALTER COLUMN code SET DEFAULT ('abc')::code_new;
+
+ALTER TABLE items ALTER COLUMN label TYPE text USING label::text;
+
+ALTER TABLE items ALTER COLUMN hue TYPE hue_new USING hue::text::hue_new;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS notes_marked_idx_pgschema_new ON notes (id) WHERE (note = 'x'::text);
+
+-- pgschema:wait
+SELECT 
+    COALESCE(i.indisvalid, false) as done,
+    CASE 
+        WHEN p.blocks_total > 0 THEN p.blocks_done * 100 / p.blocks_total
+        ELSE 0
+    END as progress
+FROM pg_class c
+JOIN pg_namespace n ON c.relnamespace = n.oid
+LEFT JOIN pg_index i ON c.oid = i.indexrelid
+LEFT JOIN pg_stat_progress_create_index p ON c.oid = p.index_relid
+WHERE c.relname = 'notes_marked_idx_pgschema_new'
+  AND n.nspname = 'public';
+
+DROP INDEX IF EXISTS notes_marked_idx;
+
+ALTER INDEX notes_marked_idx_pgschema_new RENAME TO notes_marked_idx;
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS notes_tag_idx_pgschema_new ON notes (note);
+
+-- pgschema:wait
+SELECT 
+    COALESCE(i.indisvalid, false) as done,
+    CASE 
+        WHEN p.blocks_total > 0 THEN p.blocks_done * 100 / p.blocks_total
+        ELSE 0
+    END as progress
+FROM pg_class c
+JOIN pg_namespace n ON c.relnamespace = n.oid
+LEFT JOIN pg_index i ON c.oid = i.indexrelid
+LEFT JOIN pg_stat_progress_create_index p ON c.oid = p.index_relid
+WHERE c.relname = 'notes_tag_idx_pgschema_new'
+  AND n.nspname = 'public';
+
+DROP INDEX IF EXISTS notes_tag_idx;
+
+ALTER INDEX notes_tag_idx_pgschema_new RENAME TO notes_tag_idx;
+
+DROP DOMAIN IF EXISTS tag_old RESTRICT;
+
+DROP DOMAIN IF EXISTS mark_old RESTRICT;
+
+DROP DOMAIN IF EXISTS label_old RESTRICT;
+
+DROP DOMAIN IF EXISTS hue_tag_old RESTRICT;
+
+DROP DOMAIN IF EXISTS hue_base_old RESTRICT;
+
+DROP TYPE IF EXISTS hue_old RESTRICT;
+
+DROP DOMAIN IF EXISTS code_old RESTRICT;
+
+DROP FUNCTION IF EXISTS is_short(text);

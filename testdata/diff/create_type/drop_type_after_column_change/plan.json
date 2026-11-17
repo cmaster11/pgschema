@@ -1,0 +1,250 @@
+{
+  "version": "1.0.0",
+  "pgschema_version": "1.14.1",
+  "created_at": "1970-01-01T00:00:00Z",
+  "source_fingerprint": {
+    "hash": "b0494ab85c6f2aba4a05cccf64001b49b6a62b13e08102ce2a25b463b0acede0"
+  },
+  "groups": [
+    {
+      "steps": [
+        {
+          "sql": "CREATE TYPE level_new AS ENUM (\n    'low',\n    'mid',\n    'high'\n);",
+          "type": "type",
+          "operation": "create",
+          "path": "public.level_new"
+        },
+        {
+          "sql": "CREATE TYPE mood_new AS ENUM (\n    'calm',\n    'busy'\n);",
+          "type": "type",
+          "operation": "create",
+          "path": "public.mood_new"
+        },
+        {
+          "sql": "CREATE TYPE priority_new AS ENUM (\n    'low',\n    'mid',\n    'high'\n);",
+          "type": "type",
+          "operation": "create",
+          "path": "public.priority_new"
+        },
+        {
+          "sql": "CREATE TYPE status_new AS ENUM (\n    'a',\n    'b',\n    'c'\n);",
+          "type": "type",
+          "operation": "create",
+          "path": "public.status_new"
+        },
+        {
+          "sql": "ALTER TYPE settings ALTER ATTRIBUTE level TYPE level_new;",
+          "type": "type",
+          "operation": "alter",
+          "path": "public.settings"
+        },
+        {
+          "sql": "CREATE OR REPLACE TRIGGER notes_touch\n    BEFORE UPDATE ON notes\n    FOR EACH ROW\n    WHEN (((NEW.note = 'on'::text)))\n    EXECUTE FUNCTION notes_touch();",
+          "type": "table.trigger",
+          "operation": "alter",
+          "path": "public.notes.notes_touch"
+        },
+        {
+          "sql": "ALTER POLICY notes_own ON notes USING (note = 'own') WITH CHECK (note = 'me');",
+          "type": "table.policy",
+          "operation": "alter",
+          "path": "public.notes.notes_own"
+        },
+        {
+          "sql": "ALTER TABLE orders DROP COLUMN flag;",
+          "type": "table.column",
+          "operation": "drop",
+          "path": "public.orders.flag"
+        },
+        {
+          "sql": "ALTER TABLE orders ALTER COLUMN status DROP DEFAULT;",
+          "type": "table.column",
+          "operation": "alter",
+          "path": "public.orders.status"
+        },
+        {
+          "sql": "ALTER TABLE orders ALTER COLUMN status TYPE status_new USING status::text::status_new;",
+          "type": "table.column",
+          "operation": "alter",
+          "path": "public.orders.status"
+        },
+        {
+          "sql": "ALTER TABLE orders ALTER COLUMN status SET DEFAULT 'a'::status_new;",
+          "type": "table.column",
+          "operation": "alter",
+          "path": "public.orders.status"
+        },
+        {
+          "sql": "ALTER TABLE orders ALTER COLUMN history TYPE status_new[] USING history::text::status_new[];",
+          "type": "table.column",
+          "operation": "alter",
+          "path": "public.orders.history"
+        },
+        {
+          "sql": "ALTER TABLE orders ALTER COLUMN kind TYPE text USING kind::text;",
+          "type": "table.column",
+          "operation": "alter",
+          "path": "public.orders.kind"
+        },
+        {
+          "sql": "ALTER TABLE orders ALTER COLUMN mood TYPE mood_new USING mood::mood_new;",
+          "type": "table.column",
+          "operation": "alter",
+          "path": "public.orders.mood"
+        },
+        {
+          "sql": "ALTER TABLE orders ALTER COLUMN note SET DEFAULT 'soft';",
+          "type": "table.column",
+          "operation": "alter",
+          "path": "public.orders.note"
+        },
+        {
+          "sql": "ALTER TABLE shipments DROP CONSTRAINT grade_known;",
+          "type": "table.constraint",
+          "operation": "drop",
+          "path": "public.shipments.grade_known"
+        },
+        {
+          "sql": "ALTER TABLE shipments DROP CONSTRAINT status_not_b;",
+          "type": "table.constraint",
+          "operation": "drop",
+          "path": "public.shipments.status_not_b"
+        },
+        {
+          "sql": "DROP INDEX IF EXISTS shipments_a_idx;",
+          "type": "table.index",
+          "operation": "drop",
+          "path": "public.shipments.shipments_a_idx"
+        },
+        {
+          "sql": "DROP INDEX IF EXISTS shipments_b_idx;",
+          "type": "table.index",
+          "operation": "drop",
+          "path": "public.shipments.shipments_b_idx"
+        },
+        {
+          "sql": "ALTER TABLE shipments ALTER COLUMN status TYPE status_new USING status::text::status_new;",
+          "type": "table.column",
+          "operation": "alter",
+          "path": "public.shipments.status"
+        },
+        {
+          "sql": "ALTER TABLE shipments\nADD CONSTRAINT status_not_b CHECK (status <> 'b'::status_new) NOT VALID;",
+          "type": "table.constraint",
+          "operation": "create",
+          "path": "public.shipments.status_not_b"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "ALTER TABLE shipments VALIDATE CONSTRAINT status_not_b;",
+          "type": "table.constraint",
+          "operation": "create",
+          "path": "public.shipments.status_not_b"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "CREATE INDEX CONCURRENTLY IF NOT EXISTS shipments_a_idx ON shipments (id) WHERE (status = 'a'::status_new);",
+          "type": "table.index",
+          "operation": "create",
+          "path": "public.shipments.shipments_a_idx"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "SELECT \n    COALESCE(i.indisvalid, false) as done,\n    CASE \n        WHEN p.blocks_total > 0 THEN p.blocks_done * 100 / p.blocks_total\n        ELSE 0\n    END as progress\nFROM pg_class c\nJOIN pg_namespace n ON c.relnamespace = n.oid\nLEFT JOIN pg_index i ON c.oid = i.indexrelid\nLEFT JOIN pg_stat_progress_create_index p ON c.oid = p.index_relid\nWHERE c.relname = 'shipments_a_idx'\n  AND n.nspname = 'public';",
+          "directive": {
+            "type": "wait",
+            "message": "Creating index shipments_a_idx"
+          },
+          "type": "table.index",
+          "operation": "create",
+          "path": "public.shipments.shipments_a_idx"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "DROP FUNCTION IF EXISTS default_priority();",
+          "type": "function",
+          "operation": "alter",
+          "path": "public.default_priority"
+        },
+        {
+          "sql": "CREATE OR REPLACE FUNCTION default_priority()\nRETURNS priority_new\nLANGUAGE sql\nVOLATILE\nAS $$ SELECT 'low'::priority_new\n$$;",
+          "type": "function",
+          "operation": "alter",
+          "path": "public.default_priority"
+        },
+        {
+          "sql": "DROP TYPE IF EXISTS tone_old RESTRICT;",
+          "type": "type",
+          "operation": "drop",
+          "path": "public.tone_old"
+        },
+        {
+          "sql": "DROP TYPE IF EXISTS status_old RESTRICT;",
+          "type": "type",
+          "operation": "drop",
+          "path": "public.status_old"
+        },
+        {
+          "sql": "DROP TYPE IF EXISTS scope_old RESTRICT;",
+          "type": "type",
+          "operation": "drop",
+          "path": "public.scope_old"
+        },
+        {
+          "sql": "DROP TYPE IF EXISTS priority_old RESTRICT;",
+          "type": "type",
+          "operation": "drop",
+          "path": "public.priority_old"
+        },
+        {
+          "sql": "DROP TYPE IF EXISTS owner_old RESTRICT;",
+          "type": "type",
+          "operation": "drop",
+          "path": "public.owner_old"
+        },
+        {
+          "sql": "DROP TYPE IF EXISTS mark_old RESTRICT;",
+          "type": "type",
+          "operation": "drop",
+          "path": "public.mark_old"
+        },
+        {
+          "sql": "DROP TYPE IF EXISTS level_old RESTRICT;",
+          "type": "type",
+          "operation": "drop",
+          "path": "public.level_old"
+        },
+        {
+          "sql": "DROP TYPE IF EXISTS kind_old RESTRICT;",
+          "type": "type",
+          "operation": "drop",
+          "path": "public.kind_old"
+        },
+        {
+          "sql": "DROP TYPE IF EXISTS grade_old RESTRICT;",
+          "type": "type",
+          "operation": "drop",
+          "path": "public.grade_old"
+        },
+        {
+          "sql": "DROP TYPE IF EXISTS flag_old RESTRICT;",
+          "type": "type",
+          "operation": "drop",
+          "path": "public.flag_old"
+        }
+      ]
+    }
+  ]
+}

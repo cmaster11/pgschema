@@ -705,6 +705,9 @@ func normalizeSchemaNames(irData *ir.IR, fromSchema, toSchema string) {
 					*param.DefaultValue = stripQualifiers(replaceString(*param.DefaultValue))
 				}
 			}
+			for i := range proc.TypeDependencies {
+				proc.TypeDependencies[i] = replaceString(proc.TypeDependencies[i])
+			}
 		}
 
 		// Types

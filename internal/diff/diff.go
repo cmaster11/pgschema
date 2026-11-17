@@ -416,6 +416,12 @@ type ddlDiff struct {
 	// unchanged views rebuilt as their dependents, and the kept callers of a
 	// pinned routine.
 	recreatedViewLookup map[string]struct{}
+	// The typeGraphKey of each type name of the new state (see
+	// collectTypeNames).
+	newStateTypeNames map[string]bool
+	// The typeGraphKey of each index name of the new state (see
+	// collectIndexNames).
+	newStateIndexNames map[string]bool
 	// Foreign keys that depend on a unique/PK constraint being dropped or
 	// recreated by this migration: existing ones are dropped before the table
 	// modifications (fkPreDrops) and desired-state ones are (re)created
@@ -551,6 +557,11 @@ type tableDiff struct {
 	// requires of the child and the child lacks; they are added right before
 	// the INHERIT. See inherit.go.
 	MissingParentChecks []*ir.Constraint
+	// EnumTypesByColumn holds, when a modified column leaves an enum (see
+	// ColumnDiff.OldEnumTypes), the enum and domain names of each column of
+	// the new table that is typed on an enum of the new state, a domain over
+	// one, or an array of either. See markColumnsLeavingEnums.
+	EnumTypesByColumn map[string]map[string]struct{}
 	// DropColumnOnly names the dropped columns an inheritance descendant
 	// keeps, dropped with ALTER TABLE ONLY; ChildConstraintDrops are the
 	// CHECK copies children drop right after this table's DROP CONSTRAINT;
@@ -569,6 +580,17 @@ type ColumnDiff struct {
 	// child keeps: only its DEFAULT, NOT NULL and generation expression are
 	// changed, the default with ALTER TABLE ONLY (see inherit.go).
 	Inherited bool
+	// OldEnumTypes is set when the current type of the column is an enum, a
+	// domain over one, or an array of either. It holds the lowercase
+	// "schema.name" of that enum and of the domains that lead to it.
+	OldEnumTypes map[string]struct{}
+	// ConvertThroughText is set when the column leaves an enum (see
+	// OldEnumTypes) that this migration drops, for an enum, a domain over
+	// one, or an array of either. PostgreSQL has no built-in cast from an
+	// enum to another enum, so the change converts the values through text.
+	// A kept enum can have a user-defined cast to the new enum, so a change
+	// from it keeps the plain cast.
+	ConvertThroughText bool
 }
 
 // ConstraintDiff represents changes to a constraint
@@ -1044,6 +1066,10 @@ func generateMigration(oldIR, newIR *ir.IR, targetSchema string, qualifySchema b
 			}
 		}
 	}
+
+	markColumnsLeavingEnums(diff.modifiedTables, oldTypes, newTypes, diff.droppedOrReplacedTypeLookup())
+	diff.newStateTypeNames = collectTypeNames(newIR)
+	diff.newStateIndexNames = collectIndexNames(newIR)
 
 	// Compare views across all schemas
 	oldViews := make(map[string]*ir.View)
@@ -2011,13 +2037,13 @@ func (d *ddlDiff) collectMigrationSQL(targetSchema string, collector *diffCollec
 	}
 
 	// First: Drop operations (in reverse dependency order)
-	d.generateDropSQL(targetSchema, collector, preDroppedViews)
+	dropsAfterChanges := d.generateDropSQL(targetSchema, collector, preDroppedViews)
 
 	// Then: Create operations (in dependency order)
 	d.generateCreateSQL(targetSchema, collector)
 
 	// Finally: Modify operations
-	d.generateModifySQL(targetSchema, collector, preDroppedViews)
+	d.generateModifySQL(targetSchema, collector, preDroppedViews, dropsAfterChanges)
 }
 
 // generatePreDropMaterializedViewsSQL drops materialized views that depend on
@@ -3085,7 +3111,9 @@ func (d *ddlDiff) generateCreateSQL(targetSchema string, collector *diffCollecto
 
 // generateModifySQL generates ALTER statements
 // preDroppedViews contains views that were already dropped in the pre-drop phase
-func (d *ddlDiff) generateModifySQL(targetSchema string, collector *diffCollector, preDroppedViews map[string]bool) {
+// dropsAfterChanges holds the type and function drops held back from the drop
+// phase until the objects that use those types are changed
+func (d *ddlDiff) generateModifySQL(targetSchema string, collector *diffCollector, preDroppedViews map[string]bool, dropsAfterChanges []droppedTypeOrFunction) {
 	// Modify schemas
 	// Note: Schema modification is out of scope for schema-level comparisons
 
@@ -3100,7 +3128,7 @@ func (d *ddlDiff) generateModifySQL(targetSchema string, collector *diffCollecto
 	generateDropRecreatedFKsSQL(d.fkPreDrops, targetSchema, collector)
 
 	// Modify tables
-	generateModifyTablesSQL(d.modifiedTables, d.droppedTables, d.fkPreDrops, d.suppressedInlineFKs, targetSchema, collector)
+	generateModifyTablesSQL(d.modifiedTables, d.droppedTables, d.fkPreDrops, d.suppressedInlineFKs, d.droppedOrReplacedTypeLookup(), targetSchema, collector)
 
 	// Columns inheritance descendants drop once every parent has (see inherit.go)
 	generateInheritanceChildDropsSQL(d.inheritanceChildEffects, targetSchema, collector)
@@ -3188,6 +3216,10 @@ func (d *ddlDiff) generateModifySQL(targetSchema string, collector *diffCollecto
 	// Modify aggregates (DROP + CREATE for definitional changes)
 	generateModifyAggregatesSQL(d.modifiedAggregates, targetSchema, collector)
 
+	// Drop the types that the tables, composite types and functions changed
+	// above stopped using
+	generateTypeAndFunctionDropsSQL(dropsAfterChanges, replacedOldTypes(d.modifiedTypes), targetSchema, collector)
+
 	// Modify default privileges
 	generateModifyDefaultPrivilegesSQL(d.modifiedDefaultPrivileges, targetSchema, collector)
 
@@ -3207,7 +3239,9 @@ func (d *ddlDiff) generateModifySQL(targetSchema string, collector *diffCollecto
 
 // generateDropSQL generates DROP statements in reverse dependency order
 // preDroppedViews contains views that were already dropped in the pre-drop phase
-func (d *ddlDiff) generateDropSQL(targetSchema string, collector *diffCollector, preDroppedViews map[string]bool) {
+// It returns the type and function drops that must wait until the modify
+// phase has changed the objects that use those types.
+func (d *ddlDiff) generateDropSQL(targetSchema string, collector *diffCollector, preDroppedViews map[string]bool) []droppedTypeOrFunction {
 
 	// REVOKE privileges BEFORE dropping objects (objects must exist for REVOKE to succeed)
 	// Skip REVOKEs on relations already dropped in the pre-drop phase: REVOKE has
@@ -3260,12 +3294,10 @@ func (d *ddlDiff) generateDropSQL(targetSchema string, collector *diffCollector,
 	// those functions wait for the end of the drop phase.
 	// The old definition of a replaced type (a changed range) is dropped here
 	// as well; its new definition is created in the create phase.
-	replaced := replacedTypes(d.modifiedTypes)
+	replacedOld := replacedOldTypes(d.modifiedTypes)
 	droppedTypes := append([]*ir.Type{}, d.droppedTypes...)
-	replacedOld := make(map[*ir.Type]*typeDiff, len(replaced))
-	for _, diff := range replaced {
-		droppedTypes = append(droppedTypes, diff.Old)
-		replacedOld[diff.Old] = diff
+	for old := range replacedOld {
+		droppedTypes = append(droppedTypes, old)
 	}
 	functionsToDrop, functionsAfterTypes := holdBackFunctionsOfDroppedTypes(d.droppedFunctions, droppedTypes)
 	generateDropFunctionsSQL(functionsToDrop, targetSchema, collector)
@@ -3297,7 +3329,28 @@ func (d *ddlDiff) generateDropSQL(targetSchema string, collector *diffCollector,
 	// Drop types, interleaved with the held-back functions in dependency
 	// order: a range before its subtype_diff function, that function before
 	// the subtype its signature takes, a domain before its CHECK function.
-	for _, node := range orderTypeAndFunctionDrops(droppedTypes, functionsAfterTypes) {
+	// A type that a modified table, composite type or function still uses
+	// waits, with what must follow it, until the end of the modify phase:
+	// the column, attribute or function moves off the type only in a later
+	// phase. A type never waits when the migration creates an object under
+	// its name before the end of the modify phase (see typeNameTakenByNewObject).
+	dropNow, dropAfterChanges := splitTypeAndFunctionDrops(droppedTypes, functionsAfterTypes, d.typeUsedByModifiedObject, func(t *ir.Type) bool {
+		_, replaced := replacedOld[t]
+		return replaced || d.typeNameTakenByNewObject(t)
+	})
+	generateTypeAndFunctionDropsSQL(dropNow, replacedOld, targetSchema, collector)
+
+	// Drop schemas
+	// Note: Schema deletion is out of scope for schema-level comparisons
+
+	return dropAfterChanges
+}
+
+// generateTypeAndFunctionDropsSQL drops the nodes of a joint type and
+// function drop order. replacedOld maps the old definition of a replaced type
+// to its diff, which is the source of that drop.
+func generateTypeAndFunctionDropsSQL(nodes []droppedTypeOrFunction, replacedOld map[*ir.Type]*typeDiff, targetSchema string, collector *diffCollector) {
+	for _, node := range nodes {
 		if node.function != nil {
 			generateDropFunctionsSQL([]*ir.Function{node.function}, targetSchema, collector)
 			continue
@@ -3308,9 +3361,211 @@ func (d *ddlDiff) generateDropSQL(targetSchema string, collector *diffCollector,
 		}
 		generateDropTypeSQL(node.typeObj, source, targetSchema, collector)
 	}
+}
 
-	// Drop schemas
-	// Note: Schema deletion is out of scope for schema-level comparisons
+// droppedOrReplacedTypeLookup returns the lowercase "schema.name" of each type
+// that this migration drops, or drops and creates again (see replacedTypes).
+func (d *ddlDiff) droppedOrReplacedTypeLookup() map[string]struct{} {
+	lookup := make(map[string]struct{}, len(d.droppedTypes))
+	for _, t := range d.droppedTypes {
+		lookup[strings.ToLower(t.Schema+"."+t.Name)] = struct{}{}
+	}
+	for old := range replacedOldTypes(d.modifiedTypes) {
+		lookup[strings.ToLower(old.Schema+"."+old.Name)] = struct{}{}
+	}
+	return lookup
+}
+
+// collectTypeNames returns the typeGraphKey of each type name of the state:
+// its types and the row types of its tables, views, materialized views and
+// sequences. A dropped type name that the new state holds is taken by an
+// object that the migration creates, because the old state had the type.
+func collectTypeNames(state *ir.IR) map[string]bool {
+	names := make(map[string]bool)
+	for _, schema := range state.Schemas {
+		for _, table := range schema.Tables {
+			names[typeGraphKey(table.Schema, table.Name)] = true
+		}
+		for _, view := range schema.Views {
+			names[typeGraphKey(view.Schema, view.Name)] = true
+		}
+		for _, seq := range schema.Sequences {
+			names[typeGraphKey(seq.Schema, seq.Name)] = true
+		}
+		for _, typ := range schema.Types {
+			names[typeGraphKey(typ.Schema, typ.Name)] = true
+		}
+	}
+	return names
+}
+
+// collectIndexNames returns the typeGraphKey of each index name of the state:
+// the indexes of its tables and materialized views, and the primary key,
+// unique and exclusion constraints, whose index takes the constraint name.
+func collectIndexNames(state *ir.IR) map[string]bool {
+	names := make(map[string]bool)
+	for _, schema := range state.Schemas {
+		for _, table := range schema.Tables {
+			for _, index := range table.Indexes {
+				names[typeGraphKey(table.Schema, index.Name)] = true
+			}
+			for _, constraint := range table.Constraints {
+				switch constraint.Type {
+				case ir.ConstraintTypePrimaryKey, ir.ConstraintTypeUnique, ir.ConstraintTypeExclusion:
+					names[typeGraphKey(table.Schema, constraint.Name)] = true
+				}
+			}
+		}
+		for _, view := range schema.Views {
+			for _, index := range view.Indexes {
+				names[typeGraphKey(view.Schema, index.Name)] = true
+			}
+		}
+	}
+	return names
+}
+
+// typeNameTakenByNewObject reports whether an object of the new state takes
+// the name of a dropped type, so that the migration creates it while the
+// type exists: a type, or a table, view, materialized view or sequence,
+// whose row type takes the name (SQLSTATE 42710). A composite type also has
+// an entry in pg_class, so for it an index, or a constraint that creates an
+// index, takes the name too (SQLSTATE 42P07). Other kinds of types have no
+// pg_class entry.
+func (d *ddlDiff) typeNameTakenByNewObject(t *ir.Type) bool {
+	key := typeGraphKey(t.Schema, t.Name)
+	return d.newStateTypeNames[key] || (t.Kind == ir.TypeKindComposite && d.newStateIndexNames[key])
+}
+
+// typeUsedByModifiedObject reports whether the current state of a modified
+// table uses the type (see tableUsesType), whether the current definition of
+// a modified function, procedure or aggregate depends on it, or whether a
+// modified composite type has an attribute on it that changes to another
+// type. The table and routine changes run in the modify phase and the
+// attribute changes in the create phase, so the type cannot be dropped
+// before them.
+func (d *ddlDiff) typeUsedByModifiedObject(t *ir.Type) bool {
+	lookup := map[string]struct{}{strings.ToLower(t.Schema + "." + t.Name): {}}
+	for _, td := range d.modifiedTables {
+		if old := d.oldTables[td.Table.Schema+"."+td.Table.Name]; old != nil && tableUsesType(old, lookup) {
+			return true
+		}
+	}
+	for _, fd := range d.modifiedFunctions {
+		if functionDependsOnType(fd.Old, t) {
+			return true
+		}
+	}
+	for _, pd := range d.modifiedProcedures {
+		if dependsOnType(pd.Old.TypeDependencies, t) {
+			return true
+		}
+	}
+	for _, ad := range d.modifiedAggregates {
+		if aggregateUsesType(ad.Old, lookup) {
+			return true
+		}
+	}
+	for _, diff := range d.modifiedTypes {
+		if diff.Old.Kind != ir.TypeKindComposite || diff.New.Kind != ir.TypeKindComposite {
+			continue
+		}
+		newAttrTypes := make(map[string]string, len(diff.New.Columns))
+		for _, attr := range diff.New.Columns {
+			newAttrTypes[attr.Name] = attr.DataType
+		}
+		for _, attr := range diff.Old.Columns {
+			newType, kept := newAttrTypes[attr.Name]
+			if kept && newType != attr.DataType && typeMatchesLookup(extractBaseTypeName(attr.DataType), diff.Old.Schema, lookup) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// aggregateUsesType reports whether the result, state or moving-aggregate
+// state type of the aggregate is one of the types, or an array of one. A
+// polymorphic transition function lets the state type change while the
+// support functions stay.
+func aggregateUsesType(agg *ir.Aggregate, types map[string]struct{}) bool {
+	for _, typeName := range []string{agg.ReturnType, agg.StateType, agg.MStateType} {
+		if typeMatchesLookup(extractBaseTypeName(typeName), agg.Schema, types) {
+			return true
+		}
+	}
+	return false
+}
+
+// tableUsesType reports whether a column of the table is typed on one of the
+// types, or an expression of the table casts to one of them: a column default
+// or generation expression, a CHECK or EXCLUDE constraint, an index
+// expression or predicate, a policy, or a trigger WHEN condition.
+func tableUsesType(table *ir.Table, types map[string]struct{}) bool {
+	if tableUsesDeferredDomain(table, types) {
+		return true
+	}
+	casts := func(expr string) bool { return exprCastsToType(expr, table.Schema, types) }
+	for _, col := range table.Columns {
+		if col.DefaultValue != nil && casts(*col.DefaultValue) {
+			return true
+		}
+		if col.GeneratedExpr != nil && casts(*col.GeneratedExpr) {
+			return true
+		}
+	}
+	for _, constraint := range table.Constraints {
+		if casts(constraint.CheckClause) || casts(constraint.ExclusionDefinition) {
+			return true
+		}
+	}
+	for _, index := range table.Indexes {
+		if indexCasts(index, casts) {
+			return true
+		}
+	}
+	for _, policy := range table.Policies {
+		if casts(policy.Using) || casts(policy.WithCheck) {
+			return true
+		}
+	}
+	for _, trigger := range table.Triggers {
+		if casts(trigger.Condition) {
+			return true
+		}
+	}
+	return false
+}
+
+// indexCasts reports whether casts accepts the predicate or an expression
+// column of the index.
+func indexCasts(index *ir.Index, casts func(expr string) bool) bool {
+	if casts(index.Where) {
+		return true
+	}
+	for _, col := range index.Columns {
+		if casts(col.Name) {
+			return true
+		}
+	}
+	return false
+}
+
+// typeCastRegex captures the type name of a "::" cast in a deparsed expression.
+var typeCastRegex = regexp.MustCompile(`(?i)::\s*(` + qualifiedIdentExpr + `)`)
+
+// exprCastsToType reports whether a deparsed expression casts to one of the
+// types, or to an array of one.
+func exprCastsToType(expr, defaultSchema string, types map[string]struct{}) bool {
+	if expr == "" {
+		return false
+	}
+	for _, match := range typeCastRegex.FindAllStringSubmatch(stripStringLiterals(expr), -1) {
+		if typeMatchesLookup(extractBaseTypeName(match[1]), defaultSchema, types) {
+			return true
+		}
+	}
+	return false
 }
 
 // filterPreDroppedViews returns views that haven't been pre-dropped
@@ -4724,7 +4979,13 @@ func holdBackFunctionsOfDroppedTypes(functions []*ir.Function, types []*ir.Type)
 // SQL-standard body casts to or a parameter default names (pg_depend, loaded
 // into Function.TypeDependencies as schema.name).
 func functionDependsOnType(fn *ir.Function, t *ir.Type) bool {
-	if len(fn.TypeDependencies) == 0 {
+	return dependsOnType(fn.TypeDependencies, t)
+}
+
+// dependsOnType reports whether the pg_depend type dependencies of a
+// function or procedure hold the type, or a range's multirange.
+func dependsOnType(typeDependencies []string, t *ir.Type) bool {
+	if len(typeDependencies) == 0 {
 		return false
 	}
 	keys := map[string]bool{t.Schema + "." + t.Name: true}
@@ -4735,7 +4996,7 @@ func functionDependsOnType(fn *ir.Function, t *ir.Type) bool {
 			keys[t.Schema+"."+unquoteIdent(t.MultirangeTypeName)] = true
 		}
 	}
-	for _, dep := range fn.TypeDependencies {
+	for _, dep := range typeDependencies {
 		if keys[dep] {
 			return true
 		}
@@ -4749,6 +5010,13 @@ type droppedTypeOrFunction struct {
 	function *ir.Function
 }
 
+func (n droppedTypeOrFunction) key() string {
+	if n.function != nil {
+		return "f\x00" + n.function.Schema + "." + n.function.Name + "(" + n.function.GetArguments() + ")"
+	}
+	return "t\x00" + typeGraphKey(n.typeObj.Schema, n.typeObj.Name)
+}
+
 // orderTypeAndFunctionDrops interleaves the dropped types and the held-back
 // functions so that every object goes before what it depends on: a type
 // before the type it is built on, a type before the function it names (a
@@ -4757,9 +5025,63 @@ type droppedTypeOrFunction struct {
 // its callee. Ties break with types first, then by name, so the output stays
 // deterministic.
 func orderTypeAndFunctionDrops(types []*ir.Type, functions []*ir.Function) []droppedTypeOrFunction {
+	nodes, after := typeAndFunctionDropGraph(types, functions)
+	return sortTypeAndFunctionDrops(nodes, after)
+}
+
+// splitTypeAndFunctionDrops orders the drops as orderTypeAndFunctionDrops
+// does and splits off the types that wait accepts, together with every node
+// that must be dropped after one of them. A type that wait accepts stays in
+// the first part when one of those nodes is a type that stay accepts. Both
+// parts keep the joint order, and nothing in the first part depends on the
+// second, so the second part can be emitted later in the migration.
+func splitTypeAndFunctionDrops(types []*ir.Type, functions []*ir.Function, wait, stay func(*ir.Type) bool) (now, later []droppedTypeOrFunction) {
+	nodes, after := typeAndFunctionDropGraph(types, functions)
+	waiting := make(map[string]bool)
+	for key, node := range nodes {
+		if node.typeObj == nil || !wait(node.typeObj) {
+			continue
+		}
+		closure := dropClosure(key, after)
+		if slices.ContainsFunc(closure, func(k string) bool { return nodes[k].typeObj != nil && stay(nodes[k].typeObj) }) {
+			continue
+		}
+		for _, k := range closure {
+			waiting[k] = true
+		}
+	}
+	for _, node := range sortTypeAndFunctionDrops(nodes, after) {
+		if waiting[node.key()] {
+			later = append(later, node)
+		} else {
+			now = append(now, node)
+		}
+	}
+	return now, later
+}
+
+// dropClosure returns the key and the keys of every node that must be dropped
+// after it, directly or through other nodes.
+func dropClosure(key string, after map[string][]string) []string {
+	seen := map[string]bool{key: true}
+	closure := []string{key}
+	for i := 0; i < len(closure); i++ {
+		for _, next := range after[closure[i]] {
+			if !seen[next] {
+				seen[next] = true
+				closure = append(closure, next)
+			}
+		}
+	}
+	return closure
+}
+
+// typeAndFunctionDropGraph returns the nodes of the joint drop order by key,
+// and for each key the keys of the nodes that must be dropped after it.
+func typeAndFunctionDropGraph(types []*ir.Type, functions []*ir.Function) (map[string]droppedTypeOrFunction, map[string][]string) {
 	typeMap, _, typeEdges := buildTypeGraph(types)
-	typeKey := func(t *ir.Type) string { return "t\x00" + typeGraphKey(t.Schema, t.Name) }
-	fnKey := func(f *ir.Function) string { return "f\x00" + f.Schema + "." + f.Name + "(" + f.GetArguments() + ")" }
+	typeKey := func(t *ir.Type) string { return droppedTypeOrFunction{typeObj: t}.key() }
+	fnKey := func(f *ir.Function) string { return droppedTypeOrFunction{function: f}.key() }
 
 	nodes := make(map[string]droppedTypeOrFunction, len(types)+len(functions))
 	for _, t := range types {
@@ -4769,15 +5091,12 @@ func orderTypeAndFunctionDrops(types []*ir.Type, functions []*ir.Function) []dro
 		nodes[fnKey(f)] = droppedTypeOrFunction{function: f}
 	}
 
-	// after[a] lists the nodes that must be dropped after a.
 	after := make(map[string][]string, len(nodes))
-	inDegree := make(map[string]int, len(nodes))
 	addEdge := func(first, second string) {
 		if first == second {
 			return
 		}
 		after[first] = append(after[first], second)
-		inDegree[second]++
 	}
 	// Every edge is a catalog fact: type structure, a type naming a
 	// function, a function's signature or recorded type dependencies, and
@@ -4814,6 +5133,18 @@ func orderTypeAndFunctionDrops(types []*ir.Type, functions []*ir.Function) []dro
 			if slices.Contains(f.Dependencies, callee.Schema+"."+callee.Name+"("+callee.GetArguments()+")") {
 				addEdge(fnKey(f), fnKey(callee))
 			}
+		}
+	}
+	return nodes, after
+}
+
+// sortTypeAndFunctionDrops sorts the nodes so that each one precedes the
+// nodes listed after it.
+func sortTypeAndFunctionDrops(nodes map[string]droppedTypeOrFunction, after map[string][]string) []droppedTypeOrFunction {
+	inDegree := make(map[string]int, len(nodes))
+	for _, seconds := range after {
+		for _, second := range seconds {
+			inDegree[second]++
 		}
 	}
 

@@ -1411,8 +1411,8 @@ func (i *Inspector) buildFunctionDependencies(ctx context.Context, schema *IR, t
 		}
 	}
 
-	// Types the functions depend on (signature, SQL-standard body, parameter
-	// defaults), keyed the same way; used to order drops.
+	// Types the functions and procedures depend on (signature, SQL-standard
+	// body, parameter defaults), keyed the same way; used to order drops.
 	typeDeps, err := i.queries.GetFunctionTypeDependencies(ctx, sql.NullString{String: targetSchema, Valid: true})
 	if err != nil {
 		return err
@@ -1422,10 +1422,14 @@ func (i *Inspector) buildFunctionDependencies(ctx context.Context, schema *IR, t
 		key := dep.FunctionName + "(" + argKey(dep.FunctionArgs, dep.FunctionSchema) + ")"
 		typeDepMap[key] = append(typeDepMap[key], dep.TypeSchema+"."+dep.TypeName)
 	}
-	for funcKey, fn := range dbSchema.Functions {
-		if deps, ok := typeDepMap[funcKey]; ok {
-			sort.Strings(deps)
-			fn.TypeDependencies = slices.Compact(deps)
+	for key, deps := range typeDepMap {
+		sort.Strings(deps)
+		deps = slices.Compact(deps)
+		if fn, ok := dbSchema.Functions[key]; ok {
+			fn.TypeDependencies = deps
+		}
+		if proc, ok := dbSchema.Procedures[key]; ok {
+			proc.TypeDependencies = deps
 		}
 	}
 

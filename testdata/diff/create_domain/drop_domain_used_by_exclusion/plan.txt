@@ -1,0 +1,19 @@
+Plan: 1 to modify, 1 to drop.
+
+Summary by type:
+  tables: 1 to modify
+
+Tables:
+  ~ notes
+    - notes_own_excl (constraint)
+    + notes_own_excl (constraint)
+
+DDL to be executed:
+--------------------------------------------------
+
+ALTER TABLE notes DROP CONSTRAINT notes_own_excl;
+
+ALTER TABLE notes
+ADD CONSTRAINT notes_own_excl EXCLUDE USING btree (id WITH =) WHERE (note = 'own'::text);
+
+DROP DOMAIN IF EXISTS scope_old RESTRICT;

@@ -1,0 +1,184 @@
+{
+  "version": "1.0.0",
+  "pgschema_version": "1.14.1",
+  "created_at": "1970-01-01T00:00:00Z",
+  "source_fingerprint": {
+    "hash": "b3042b821e929f179f42a27a01abd3cc8d16bfc6d67bde987c07586563b94bdc"
+  },
+  "groups": [
+    {
+      "steps": [
+        {
+          "sql": "CREATE DOMAIN code_new AS text\n  CONSTRAINT code_new_check CHECK (VALUE ~ '^[a-z0-9]+$');",
+          "type": "domain",
+          "operation": "create",
+          "path": "public.code_new"
+        },
+        {
+          "sql": "CREATE TYPE hue_new AS ENUM (\n    'red',\n    'blue',\n    'green'\n);",
+          "type": "type",
+          "operation": "create",
+          "path": "public.hue_new"
+        },
+        {
+          "sql": "ALTER TABLE items ALTER COLUMN code DROP DEFAULT;",
+          "type": "table.column",
+          "operation": "alter",
+          "path": "public.items.code"
+        },
+        {
+          "sql": "ALTER TABLE items ALTER COLUMN code TYPE code_new USING code::code_new;",
+          "type": "table.column",
+          "operation": "alter",
+          "path": "public.items.code"
+        },
+        {
+          "sql": "ALTER TABLE items ALTER COLUMN code SET DEFAULT ('abc')::code_new;",
+          "type": "table.column",
+          "operation": "alter",
+          "path": "public.items.code"
+        },
+        {
+          "sql": "ALTER TABLE items ALTER COLUMN label TYPE text USING label::text;",
+          "type": "table.column",
+          "operation": "alter",
+          "path": "public.items.label"
+        },
+        {
+          "sql": "ALTER TABLE items ALTER COLUMN hue TYPE hue_new USING hue::text::hue_new;",
+          "type": "table.column",
+          "operation": "alter",
+          "path": "public.items.hue"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "CREATE INDEX CONCURRENTLY IF NOT EXISTS notes_marked_idx_pgschema_new ON notes (id) WHERE (note = 'x'::text);",
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.notes.notes_marked_idx"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "SELECT \n    COALESCE(i.indisvalid, false) as done,\n    CASE \n        WHEN p.blocks_total > 0 THEN p.blocks_done * 100 / p.blocks_total\n        ELSE 0\n    END as progress\nFROM pg_class c\nJOIN pg_namespace n ON c.relnamespace = n.oid\nLEFT JOIN pg_index i ON c.oid = i.indexrelid\nLEFT JOIN pg_stat_progress_create_index p ON c.oid = p.index_relid\nWHERE c.relname = 'notes_marked_idx_pgschema_new'\n  AND n.nspname = 'public';",
+          "directive": {
+            "type": "wait",
+            "message": "Creating index notes_marked_idx_pgschema_new"
+          },
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.notes.notes_marked_idx"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "DROP INDEX IF EXISTS notes_marked_idx;",
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.notes.notes_marked_idx"
+        },
+        {
+          "sql": "ALTER INDEX notes_marked_idx_pgschema_new RENAME TO notes_marked_idx;",
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.notes.notes_marked_idx"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "CREATE INDEX CONCURRENTLY IF NOT EXISTS notes_tag_idx_pgschema_new ON notes (note);",
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.notes.notes_tag_idx"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "SELECT \n    COALESCE(i.indisvalid, false) as done,\n    CASE \n        WHEN p.blocks_total > 0 THEN p.blocks_done * 100 / p.blocks_total\n        ELSE 0\n    END as progress\nFROM pg_class c\nJOIN pg_namespace n ON c.relnamespace = n.oid\nLEFT JOIN pg_index i ON c.oid = i.indexrelid\nLEFT JOIN pg_stat_progress_create_index p ON c.oid = p.index_relid\nWHERE c.relname = 'notes_tag_idx_pgschema_new'\n  AND n.nspname = 'public';",
+          "directive": {
+            "type": "wait",
+            "message": "Creating index notes_tag_idx_pgschema_new"
+          },
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.notes.notes_tag_idx"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "DROP INDEX IF EXISTS notes_tag_idx;",
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.notes.notes_tag_idx"
+        },
+        {
+          "sql": "ALTER INDEX notes_tag_idx_pgschema_new RENAME TO notes_tag_idx;",
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.notes.notes_tag_idx"
+        },
+        {
+          "sql": "DROP DOMAIN IF EXISTS tag_old RESTRICT;",
+          "type": "domain",
+          "operation": "drop",
+          "path": "public.tag_old"
+        },
+        {
+          "sql": "DROP DOMAIN IF EXISTS mark_old RESTRICT;",
+          "type": "domain",
+          "operation": "drop",
+          "path": "public.mark_old"
+        },
+        {
+          "sql": "DROP DOMAIN IF EXISTS label_old RESTRICT;",
+          "type": "domain",
+          "operation": "drop",
+          "path": "public.label_old"
+        },
+        {
+          "sql": "DROP DOMAIN IF EXISTS hue_tag_old RESTRICT;",
+          "type": "domain",
+          "operation": "drop",
+          "path": "public.hue_tag_old"
+        },
+        {
+          "sql": "DROP DOMAIN IF EXISTS hue_base_old RESTRICT;",
+          "type": "domain",
+          "operation": "drop",
+          "path": "public.hue_base_old"
+        },
+        {
+          "sql": "DROP TYPE IF EXISTS hue_old RESTRICT;",
+          "type": "type",
+          "operation": "drop",
+          "path": "public.hue_old"
+        },
+        {
+          "sql": "DROP DOMAIN IF EXISTS code_old RESTRICT;",
+          "type": "domain",
+          "operation": "drop",
+          "path": "public.code_old"
+        },
+        {
+          "sql": "DROP FUNCTION IF EXISTS is_short(text);",
+          "type": "function",
+          "operation": "drop",
+          "path": "public.is_short"
+        }
+      ]
+    }
+  ]
+}

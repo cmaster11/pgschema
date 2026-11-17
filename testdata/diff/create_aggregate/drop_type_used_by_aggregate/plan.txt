@@ -1,0 +1,30 @@
+Plan: 1 to add, 1 to modify, 1 to drop.
+
+Summary by type:
+  types: 1 to add, 1 to drop
+  aggregates: 1 to modify
+
+Types:
+  + tally_new
+  - tally_old
+
+Aggregates:
+  ~ tally
+
+DDL to be executed:
+--------------------------------------------------
+
+CREATE TYPE tally_new AS ENUM (
+    'a',
+    'b'
+);
+
+DROP AGGREGATE IF EXISTS tally(integer);
+
+CREATE AGGREGATE tally(integer) (
+    SFUNC = keep_state,
+    STYPE = tally_new,
+    INITCOND = 'a'
+);
+
+DROP TYPE IF EXISTS tally_old RESTRICT;
