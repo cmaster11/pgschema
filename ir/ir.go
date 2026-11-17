@@ -598,6 +598,9 @@ type Procedure struct {
 	Language   string       `json:"language"`
 	Parameters []*Parameter `json:"parameters,omitempty"`
 	Comment    string       `json:"comment,omitempty"`
+	// TypeDependencies holds the schema.name of the types this procedure
+	// depends on per pg_depend (see Function.TypeDependencies).
+	TypeDependencies []string `json:"-"`
 }
 
 // GetArguments returns the procedure arguments string (types only) for procedure identification.

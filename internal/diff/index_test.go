@@ -199,3 +199,87 @@ func TestOnlineIndexCandidateReuseRejectsAttachedAndSharedCandidates(t *testing.
 		}
 	})
 }
+
+// A changed index or CHECK constraint on a retyped column goes before ALTER
+// COLUMN ... TYPE only when that statement cannot rebuild its old definition.
+// Every other one keeps its usual steps, where a changed index is replaced
+// online.
+func TestDropBeforeColumnTypeChanges(t *testing.T) {
+	oldTypes := map[string]*ir.Type{
+		"public.status_old": {Schema: "public", Name: "status_old", Kind: ir.TypeKindEnum},
+		"public.state":      {Schema: "public", Name: "state", Kind: ir.TypeKindEnum},
+		"public.mood":       {Schema: "public", Name: "mood", Kind: ir.TypeKindEnum},
+		"public.state_dom":  {Schema: "public", Name: "state_dom", Kind: ir.TypeKindDomain, BaseType: "public.state"},
+		"public.code_old":   {Schema: "public", Name: "code_old", Kind: ir.TypeKindDomain, BaseType: "text"},
+		"public.grade_old":  {Schema: "public", Name: "grade_old", Kind: ir.TypeKindEnum},
+	}
+	newTypes := map[string]*ir.Type{
+		"public.state":     oldTypes["public.state"],
+		"public.mood":      oldTypes["public.mood"],
+		"public.state_dom": oldTypes["public.state_dom"],
+	}
+	goneTypes := map[string]struct{}{"public.status_old": {}, "public.code_old": {}, "public.grade_old": {}}
+	cases := []struct {
+		name      string
+		oldType   string
+		newType   string
+		check     string
+		where     string
+		wantEarly bool
+	}{
+		{"integer to bigint", "integer", "bigint", "(c > 0)", "(c > 0)", false},
+		{"varchar length", "character varying(10)", "character varying(20)",
+			"((c)::text <> ''::text)", "((c)::text <> ''::text)", false},
+		{"leaves a dropped enum", "public.status_old", "public.status_new",
+			"(c <> 'b'::status_old)", "(c = 'a'::status_old)", true},
+		{"leaves a kept enum, compared with its value", "public.state", "text",
+			"(c <> 'b'::state)", "(c = 'a'::state)", true},
+		{"leaves a domain over a kept enum, compared with its value", "public.state_dom", "text",
+			"((c)::state <> 'b'::state)", "((c)::state = 'a'::state)", true},
+		{"leaves a kept enum, no value of it", "public.state", "text",
+			"((c IS NOT NULL) AND (n > 0))", "(c IS NOT NULL)", false},
+		{"leaves a kept enum, compared with another enum", "public.state", "text",
+			"((c IS NOT NULL) AND (m <> 'calm'::mood))", "(m = 'calm'::mood)", false},
+		{"leaves a kept enum, another column on it compared with its value", "public.state", "text",
+			"((c IS NOT NULL) AND (d <> 'x'::state))", "(d <> 'x'::state)", false},
+		{"leaves a kept enum, a column on a domain over it compared with its value", "public.state", "text",
+			"((c IS NOT NULL) AND ((e)::state <> 'x'::state))", "((e)::state <> 'x'::state)", false},
+		{"leaves a dropped domain, no cast to it", "public.code_old", "public.code_new",
+			"((c)::text <> ''::text)", "((c)::text <> ''::text)", false},
+		{"casts to a dropped type", "text", "character varying(50)",
+			"((c)::grade_old <> 'poor'::grade_old)", "((c)::grade_old = 'good'::grade_old)", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			check := &ir.Constraint{Schema: "public", Table: "t", Name: "t_c_check", Type: ir.ConstraintTypeCheck,
+				Columns: []*ir.ConstraintColumn{{Name: "c", Position: 1}}, CheckClause: "CHECK " + c.check}
+			index := &ir.Index{Schema: "public", Table: "t", Name: "t_c_idx", Type: ir.IndexTypeRegular,
+				Columns: []*ir.IndexColumn{{Name: "c", Position: 1}}, IsPartial: true, Where: c.where}
+			td := &tableDiff{
+				Table: &ir.Table{Schema: "public", Name: "t", Columns: []*ir.Column{
+					{Name: "c", DataType: c.newType},
+					{Name: "d", DataType: "public.state"},
+					{Name: "e", DataType: "public.state_dom"},
+					{Name: "m", DataType: "public.mood"},
+					{Name: "n", DataType: "integer"},
+				}},
+				ModifiedColumns: []*ColumnDiff{{
+					Old: &ir.Column{Name: "c", DataType: c.oldType},
+					New: &ir.Column{Name: "c", DataType: c.newType},
+				}},
+				ModifiedConstraints: []*ConstraintDiff{{Old: check, New: check}},
+				DroppedIndexes:      []*ir.Index{index},
+			}
+			markColumnsLeavingEnums([]*tableDiff{td}, oldTypes, newTypes, goneTypes)
+
+			collector := newDiffCollector()
+			dropped, remaining := td.dropBeforeColumnTypeChanges("public", collector, nil, nil, goneTypes)
+			sql := buildSQLFromSteps(collector.diffs)
+			early := dropped["t_c_check"] && len(remaining) == 0 &&
+				strings.Contains(sql, "ALTER TABLE t DROP CONSTRAINT t_c_check;") && strings.Contains(sql, "DROP INDEX IF EXISTS t_c_idx;")
+			if early != c.wantEarly || (!c.wantEarly && (len(dropped) > 0 || len(remaining) != 1 || sql != "")) {
+				t.Errorf("dropped %v, remaining %d, SQL %q; want early drops = %v", dropped, len(remaining), sql, c.wantEarly)
+			}
+		})
+	}
+}

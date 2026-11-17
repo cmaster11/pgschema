@@ -1,0 +1,17 @@
+Plan: 2 to modify.
+
+Summary by type:
+  tables: 2 to modify
+
+Tables:
+  ~ issues
+    ~ p (column)
+  ~ tasks
+    ~ p (column)
+
+DDL to be executed:
+--------------------------------------------------
+
+ALTER TABLE issues ALTER COLUMN p TYPE lvl USING p::lvl;
+
+ALTER TABLE tasks ALTER COLUMN p TYPE integer USING p::integer;

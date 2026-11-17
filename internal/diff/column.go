@@ -22,16 +22,13 @@ func (cd *ColumnDiff) generateColumnSQL(tableSchema, tableName string, targetSch
 	// numeric(18,6) -> numeric(20,6) change would be invisible here.
 	oldBaseType := stripSchemaPrefix(cd.Old.DataType, targetSchema)
 	newBaseType := stripSchemaPrefix(cd.New.DataType, targetSchema)
-	oldType := stripSchemaPrefix(comparableColumnType(cd.Old), targetSchema)
 	newType := stripSchemaPrefix(comparableColumnType(cd.New), targetSchema)
 
 	// Check if there's a type change AND the column has a default value
 	// When a USING clause is needed, we must: DROP DEFAULT -> ALTER TYPE -> SET DEFAULT
 	// because PostgreSQL can't automatically cast default values during type changes with USING
-	// A collation change has no ALTER form of its own; it rides on ALTER COLUMN
-	// TYPE, where an omitted COLLATE resets to the type's default (issue #593).
 	newCollation := stripSchemaPrefix(cd.New.Collation, targetSchema)
-	hasTypeChange := oldType != newType || stripSchemaPrefix(cd.Old.Collation, targetSchema) != newCollation
+	hasTypeChange := cd.typeChanges(targetSchema)
 	newTypeClause := newType
 	if newCollation != "" {
 		newTypeClause += " COLLATE " + newCollation
@@ -65,8 +62,12 @@ func (cd *ColumnDiff) generateColumnSQL(tableSchema, tableName string, targetSch
 		// This is required when converting from text-like types to custom types (like ENUMs)
 		// because PostgreSQL cannot implicitly cast these types
 		if needsUsing {
+			usingValue := ir.QuoteIdentifier(cd.New.Name)
+			if cd.ConvertThroughText {
+				usingValue += "::text"
+			}
 			sql := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s USING %s::%s;",
-				qualifiedTableName, ir.QuoteIdentifier(cd.New.Name), newTypeClause, ir.QuoteIdentifier(cd.New.Name), newType)
+				qualifiedTableName, ir.QuoteIdentifier(cd.New.Name), newTypeClause, usingValue, newType)
 			statements = append(statements, sql)
 		} else {
 			sql := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s;",
@@ -192,6 +193,98 @@ func inheritedColumnChanged(old, new *ir.Column) bool {
 		columnDefault(old) != columnDefault(new) ||
 		generatedExpr(old) != generatedExpr(new) ||
 		old.Comment != new.Comment
+}
+
+// typeChanges reports whether the column gets an ALTER COLUMN ... TYPE: its
+// type changes, or its collation does. A collation change has no ALTER form
+// of its own; it rides on ALTER COLUMN TYPE, where an omitted COLLATE resets
+// to the type's default (issue #593).
+func (cd *ColumnDiff) typeChanges(targetSchema string) bool {
+	return stripSchemaPrefix(comparableColumnType(cd.Old), targetSchema) != stripSchemaPrefix(comparableColumnType(cd.New), targetSchema) ||
+		stripSchemaPrefix(cd.Old.Collation, targetSchema) != stripSchemaPrefix(cd.New.Collation, targetSchema)
+}
+
+// markColumnsLeavingEnums sets OldEnumTypes on each modified column whose
+// current type is one of the enums of the current state, a domain over one
+// (also through other domains), or an array of either. It sets
+// ConvertThroughText on those of them whose enum is one of goneTypes (the
+// types that this migration drops or replaces), and whose new type is such a
+// type of the new state. On a table with such a column it also sets
+// EnumTypesByColumn.
+func markColumnsLeavingEnums(tables []*tableDiff, oldTypes, newTypes map[string]*ir.Type, goneTypes map[string]struct{}) {
+	oldByName, hasEnum := typesByName(oldTypes)
+	if !hasEnum {
+		return
+	}
+	newByName, _ := typesByName(newTypes)
+	for _, td := range tables {
+		leavesEnum := false
+		for _, cd := range td.ModifiedColumns {
+			cd.OldEnumTypes = enumTypeChain(cd.Old.DataType, td.Table.Schema, oldByName)
+			if cd.OldEnumTypes == nil {
+				continue
+			}
+			leavesEnum = true
+			cd.ConvertThroughText = chainEndsAtGoneEnum(cd.OldEnumTypes, oldByName, goneTypes) &&
+				enumTypeChain(cd.New.DataType, td.Table.Schema, newByName) != nil
+		}
+		if !leavesEnum {
+			continue
+		}
+		td.EnumTypesByColumn = make(map[string]map[string]struct{})
+		for _, col := range td.Table.Columns {
+			if chain := enumTypeChain(col.DataType, td.Table.Schema, newByName); chain != nil {
+				td.EnumTypesByColumn[col.Name] = chain
+			}
+		}
+	}
+}
+
+// chainEndsAtGoneEnum reports whether the enum of an enumTypeChain is one of
+// goneTypes.
+func chainEndsAtGoneEnum(chain map[string]struct{}, types map[string]*ir.Type, goneTypes map[string]struct{}) bool {
+	for name := range chain {
+		if _, gone := goneTypes[name]; gone && types[name].Kind == ir.TypeKindEnum {
+			return true
+		}
+	}
+	return false
+}
+
+// typesByName keys the types by their lowercase "schema.name" and reports
+// whether one of them is an enum.
+func typesByName(types map[string]*ir.Type) (map[string]*ir.Type, bool) {
+	byName := make(map[string]*ir.Type, len(types))
+	hasEnum := false
+	for _, t := range types {
+		byName[strings.ToLower(t.Schema+"."+t.Name)] = t
+		hasEnum = hasEnum || t.Kind == ir.TypeKindEnum
+	}
+	return byName, hasEnum
+}
+
+// enumTypeChain returns the lowercase "schema.name" of the type that a type
+// expression names and of each domain base type down to an enum of types
+// (keyed the same way), or nil when the chain ends at no enum.
+func enumTypeChain(typeExpr, defaultSchema string, types map[string]*ir.Type) map[string]struct{} {
+	name := strings.ToLower(extractBaseTypeName(typeExpr))
+	if !strings.Contains(name, ".") {
+		name = strings.ToLower(defaultSchema) + "." + name
+	}
+	t := types[name]
+	switch {
+	case t == nil:
+		return nil
+	case t.Kind == ir.TypeKindEnum:
+		return map[string]struct{}{name: {}}
+	case t.Kind == ir.TypeKindDomain:
+		chain := enumTypeChain(t.BaseType, t.Schema, types)
+		if chain != nil {
+			chain[name] = struct{}{}
+		}
+		return chain
+	}
+	return nil
 }
 
 // needsUsingClause determines if a type conversion requires a USING clause.

@@ -713,7 +713,7 @@ func generateDeferredConstraintsSQL(deferred []*deferredConstraint, targetSchema
 // generateModifyTablesSQL generates ALTER TABLE statements
 // deferredFKs holds "schema.table.constraint" keys of added foreign keys that
 // are emitted by the post-add step instead of with their table's changes.
-func generateModifyTablesSQL(diffs []*tableDiff, droppedTables []*ir.Table, fkPreDrops []*ir.Constraint, deferredFKs map[string]bool, targetSchema string, collector *diffCollector) {
+func generateModifyTablesSQL(diffs []*tableDiff, droppedTables []*ir.Table, fkPreDrops []*ir.Constraint, deferredFKs map[string]bool, goneTypes map[string]struct{}, targetSchema string, collector *diffCollector) {
 	// Build a set of tables being dropped (CASCADE will remove their dependent FK constraints)
 	droppedTableSet := make(map[string]bool, len(droppedTables))
 	for _, t := range droppedTables {
@@ -736,7 +736,7 @@ func generateModifyTablesSQL(diffs []*tableDiff, droppedTables []*ir.Table, fkPr
 		}
 
 		// Pass collector to generateAlterTableStatements to collect with proper context
-		diff.generateAlterTableStatements(targetSchema, collector, droppedTableSet, droppedColumnSet, preDroppedFKSet, deferredFKs)
+		diff.generateAlterTableStatements(targetSchema, collector, droppedTableSet, droppedColumnSet, preDroppedFKSet, deferredFKs, goneTypes)
 	}
 }
 
@@ -1334,6 +1334,147 @@ func constraintDroppedWithColumns(constraint *ir.Constraint, droppedColumnSet ma
 	return false
 }
 
+// retypedColumns returns the names of the columns that get an ALTER COLUMN
+// ... TYPE, or nil when none does, and the OldEnumTypes of each of those that
+// leaves an enum.
+func (td *tableDiff) retypedColumns(targetSchema string) (retyped map[string]bool, leavingEnums map[string]map[string]struct{}) {
+	for _, cd := range td.ModifiedColumns {
+		if cd.Inherited || !cd.typeChanges(targetSchema) {
+			continue
+		}
+		if retyped == nil {
+			retyped = make(map[string]bool)
+			leavingEnums = make(map[string]map[string]struct{})
+		}
+		retyped[cd.New.Name] = true
+		if cd.OldEnumTypes != nil {
+			leavingEnums[cd.New.Name] = cd.OldEnumTypes
+		}
+	}
+	return retyped, leavingEnums
+}
+
+// dropBeforeColumnTypeChanges drops the modified CHECK and EXCLUDE
+// constraints and the dropped indexes (a changed index is dropped and added)
+// that ALTER COLUMN ... TYPE cannot rebuild from their current definition.
+// That statement parses the definition again for the new column type. This
+// fails (SQLSTATE 42883) when the definition casts to one of goneTypes (the
+// types that this migration drops or replaces). It also fails when the
+// definition compares a column that leaves an enum with a value of that
+// enum. The deparsed definition then casts the value to the enum, or to a
+// domain over it. A cast to an enum or domain that another column of the
+// definition keeps does not count: the cast can belong to that column, which
+// the rebuild accepts, and the deparsed text does not tell the columns
+// apart. Every other constraint and index keeps its usual steps
+// after the column change, where a changed index is replaced online. The
+// usual steps also create the new definitions. It returns the names of the
+// constraints it dropped and the dropped indexes that remain for the usual
+// index steps.
+func (td *tableDiff) dropBeforeColumnTypeChanges(targetSchema string, collector *diffCollector, droppedColumnSet, preDroppedFKSet map[string]bool, goneTypes map[string]struct{}) (map[string]bool, []*ir.Index) {
+	retyped, leavingEnums := td.retypedColumns(targetSchema)
+	if len(retyped) == 0 {
+		return nil, td.DroppedIndexes
+	}
+	keepers := td.columnsKeepingEnumTypes(retyped)
+	rebuildFails := func(references func(columns map[string]bool) bool, castsTo func(types map[string]struct{}) bool) bool {
+		if !references(retyped) {
+			return false
+		}
+		if castsTo(goneTypes) {
+			return true
+		}
+		for column, enumTypes := range leavingEnums {
+			if !references(map[string]bool{column: true}) {
+				continue
+			}
+			left := make(map[string]struct{}, len(enumTypes))
+			for name := range enumTypes {
+				if !references(keepers[name]) {
+					left[name] = struct{}{}
+				}
+			}
+			if castsTo(left) {
+				return true
+			}
+		}
+		return false
+	}
+	tableName := getTableNameWithSchema(td.Table.Schema, td.Table.Name, targetSchema)
+	droppedConstraints := make(map[string]bool)
+	for _, cd := range td.ModifiedConstraints {
+		old := cd.Old
+		if preDroppedFKSet[constraintPathKey(old)] || constraintDroppedWithColumns(old, droppedColumnSet) {
+			continue
+		}
+		references := func(columns map[string]bool) bool { return constraintRebuiltWithColumns(old, columns) }
+		castsTo := func(types map[string]struct{}) bool {
+			return exprCastsToType(old.CheckClause, td.Table.Schema, types) || exprCastsToType(old.ExclusionDefinition, td.Table.Schema, types)
+		}
+		if !rebuildFails(references, castsTo) {
+			continue
+		}
+		collector.collect(&diffContext{
+			Type:                DiffTypeTableConstraint,
+			Operation:           DiffOperationDrop,
+			Path:                fmt.Sprintf("%s.%s.%s", td.Table.Schema, td.Table.Name, old.Name),
+			Source:              old,
+			CanRunInTransaction: true,
+		}, fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s;", tableName, ir.QuoteIdentifier(old.Name)))
+		td.generateChildConstraintDropsSQL(old.Name, targetSchema, collector)
+		droppedConstraints[old.Name] = true
+	}
+	var remainingIndexes []*ir.Index
+	for _, index := range td.DroppedIndexes {
+		references := func(columns map[string]bool) bool { return indexReferencesColumns(index, columns) }
+		castsTo := func(types map[string]struct{}) bool {
+			return indexCasts(index, func(expr string) bool { return exprCastsToType(expr, td.Table.Schema, types) })
+		}
+		if !rebuildFails(references, castsTo) {
+			remainingIndexes = append(remainingIndexes, index)
+			continue
+		}
+		collector.collect(&diffContext{
+			Type:                DiffTypeTableIndex,
+			Operation:           DiffOperationDrop,
+			Path:                fmt.Sprintf("%s.%s.%s", index.Schema, index.Table, index.Name),
+			Source:              index,
+			CanRunInTransaction: true,
+		}, fmt.Sprintf("DROP INDEX IF EXISTS %s;", qualifyEntityName(index.Schema, index.Name, targetSchema)))
+	}
+	return droppedConstraints, remainingIndexes
+}
+
+// columnsKeepingEnumTypes maps each enum and domain name of EnumTypesByColumn
+// to the columns typed on it that keep their type.
+func (td *tableDiff) columnsKeepingEnumTypes(retyped map[string]bool) map[string]map[string]bool {
+	keepers := make(map[string]map[string]bool)
+	for column, names := range td.EnumTypesByColumn {
+		if retyped[column] {
+			continue
+		}
+		for name := range names {
+			if keepers[name] == nil {
+				keepers[name] = make(map[string]bool)
+			}
+			keepers[name][column] = true
+		}
+	}
+	return keepers
+}
+
+// constraintRebuiltWithColumns reports whether the constraint is a CHECK or
+// EXCLUDE constraint on one of the columns, whose expression ALTER COLUMN ...
+// TYPE parses again for the new column type.
+func constraintRebuiltWithColumns(constraint *ir.Constraint, columns map[string]bool) bool {
+	switch constraint.Type {
+	case ir.ConstraintTypeCheck:
+		return constraintDroppedWithColumns(constraint, columns) || exprReferencesAnyColumn(constraint.CheckClause, columns)
+	case ir.ConstraintTypeExclusion:
+		return constraintDroppedWithColumns(constraint, columns) || exclusionReferencesColumns(constraint, columns)
+	}
+	return false
+}
+
 // collectDropPolicy emits DROP POLICY for a policy of this table.
 // generateChildConstraintDropsSQL emits, right after this table dropped the
 // named CHECK constraint, the drops of the copies its inheritance children
@@ -1432,7 +1573,9 @@ func indexReferencesColumns(index *ir.Index, columns map[string]bool) bool {
 // deferredFKSet contains "schema.table.constraint" keys of added FKs emitted by the
 // post-add step (they target a key that is rebuilt in this migration); their normal
 // and inline emission is skipped. (#591)
-func (td *tableDiff) generateAlterTableStatements(targetSchema string, collector *diffCollector, droppedTableSet map[string]bool, droppedColumnSet map[string]bool, preDroppedFKSet map[string]bool, deferredFKSet map[string]bool) {
+// goneTypes holds the lowercase "schema.name" of each type that this migration
+// drops or replaces (see dropBeforeColumnTypeChanges).
+func (td *tableDiff) generateAlterTableStatements(targetSchema string, collector *diffCollector, droppedTableSet map[string]bool, droppedColumnSet map[string]bool, preDroppedFKSet map[string]bool, deferredFKSet map[string]bool, goneTypes map[string]struct{}) {
 	// Persistence change (UNLOGGED to LOGGED or vice versa) should emit first
 	// because PostgreSQL rewrites the heap so doing it before column/constraint
 	// changes reduces data movement on subsequent steps
@@ -1500,6 +1643,8 @@ func (td *tableDiff) generateAlterTableStatements(targetSchema string, collector
 		}
 		collector.collect(context, sql)
 	}
+
+	constraintsDroppedEarly, droppedIndexes := td.dropBeforeColumnTypeChanges(targetSchema, collector, droppedColumnSet, preDroppedFKSet, goneTypes)
 
 	// Drop columns - already sorted by the Diff operation
 	for _, column := range td.DroppedColumns {
@@ -1816,8 +1961,9 @@ func (td *tableDiff) generateAlterTableStatements(targetSchema string, collector
 		tableName := getTableNameWithSchema(td.Table.Schema, td.Table.Name, targetSchema)
 		constraint := ConstraintDiff.New
 
-		// Step 1: Drop the old constraint unless a dropped column already removes it. (#384)
-		if !constraintDroppedWithColumns(ConstraintDiff.Old, droppedColumnSet) {
+		// Step 1: Drop the old constraint unless a dropped column already
+		// removes it (#384), or it went before a column type change above.
+		if !constraintDroppedWithColumns(ConstraintDiff.Old, droppedColumnSet) && !constraintsDroppedEarly[ConstraintDiff.Old.Name] {
 			dropSQL := fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s;", tableName, ir.QuoteIdentifier(ConstraintDiff.Old.Name))
 			dropContext := &diffContext{
 				Type:                DiffTypeTableConstraint,
@@ -2172,7 +2318,7 @@ func (td *tableDiff) generateAlterTableStatements(targetSchema string, collector
 
 	// Handle index modifications using shared function
 	generateIndexModifications(
-		td.DroppedIndexes,
+		droppedIndexes,
 		td.AddedIndexes,
 		td.ModifiedIndexes,
 		td.RecreatedColumns,

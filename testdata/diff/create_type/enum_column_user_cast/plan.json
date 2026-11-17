@@ -1,0 +1,26 @@
+{
+  "version": "1.0.0",
+  "pgschema_version": "1.14.1",
+  "created_at": "1970-01-01T00:00:00Z",
+  "source_fingerprint": {
+    "hash": "f7f336035d516f6181d76b2be107bb4c9994c020b7edfeda4448302b554d3a85"
+  },
+  "groups": [
+    {
+      "steps": [
+        {
+          "sql": "ALTER TABLE issues ALTER COLUMN p TYPE lvl USING p::lvl;",
+          "type": "table.column",
+          "operation": "alter",
+          "path": "public.issues.p"
+        },
+        {
+          "sql": "ALTER TABLE tasks ALTER COLUMN p TYPE integer USING p::integer;",
+          "type": "table.column",
+          "operation": "alter",
+          "path": "public.tasks.p"
+        }
+      ]
+    }
+  ]
+}

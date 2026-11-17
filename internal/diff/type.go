@@ -491,6 +491,17 @@ func replacedTypes(diffs []*typeDiff) map[string]*typeDiff {
 	return replaced
 }
 
+// replacedOldTypes maps the old definition of each replaced type (see
+// replacedTypes) to its diff, which is the source of the old definition's drop.
+func replacedOldTypes(diffs []*typeDiff) map[*ir.Type]*typeDiff {
+	replaced := replacedTypes(diffs)
+	old := make(map[*ir.Type]*typeDiff, len(replaced))
+	for _, diff := range replaced {
+		old[diff.Old] = diff
+	}
+	return old
+}
+
 // typesEqual compares two types for equality
 func typesEqual(old, new *ir.Type) bool {
 	if old.Schema != new.Schema {

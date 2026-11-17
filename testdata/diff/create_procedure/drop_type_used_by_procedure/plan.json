@@ -1,0 +1,38 @@
+{
+  "version": "1.0.0",
+  "pgschema_version": "1.14.1",
+  "created_at": "1970-01-01T00:00:00Z",
+  "source_fingerprint": {
+    "hash": "64eb326d4b7621aab4408b88efd7658a8e83241abbddd62f17e5fcf299e22dc6"
+  },
+  "groups": [
+    {
+      "steps": [
+        {
+          "sql": "CREATE TYPE status_new AS ENUM (\n    'a',\n    'b',\n    'c'\n);",
+          "type": "type",
+          "operation": "create",
+          "path": "public.status_new"
+        },
+        {
+          "sql": "DROP PROCEDURE IF EXISTS record_status(IN p_id integer);",
+          "type": "procedure",
+          "operation": "alter",
+          "path": "public.record_status"
+        },
+        {
+          "sql": "CREATE OR REPLACE PROCEDURE record_status(\n    IN p_id integer\n)\nLANGUAGE sql\nBEGIN ATOMIC\n INSERT INTO public.audit (id, status)\n   VALUES (record_status.p_id, ('a'::public.status_new)::text);\nEND;",
+          "type": "procedure",
+          "operation": "alter",
+          "path": "public.record_status"
+        },
+        {
+          "sql": "DROP TYPE IF EXISTS status_old RESTRICT;",
+          "type": "type",
+          "operation": "drop",
+          "path": "public.status_old"
+        }
+      ]
+    }
+  ]
+}

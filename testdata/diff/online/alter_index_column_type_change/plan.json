@@ -1,0 +1,288 @@
+{
+  "version": "1.0.0",
+  "pgschema_version": "1.14.1",
+  "created_at": "1970-01-01T00:00:00Z",
+  "source_fingerprint": {
+    "hash": "15ebde7e9ccc9c710b7ceb5a6b66f2438cefe7300df1bc06c29fc05a6736bfb6"
+  },
+  "groups": [
+    {
+      "steps": [
+        {
+          "sql": "ALTER TABLE events ALTER COLUMN account_id TYPE bigint USING account_id::bigint;",
+          "type": "table.column",
+          "operation": "alter",
+          "path": "public.events.account_id"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "CREATE INDEX CONCURRENTLY IF NOT EXISTS events_account_idx_pgschema_new ON events (account_id, created_at);",
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.events.events_account_idx"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "SELECT \n    COALESCE(i.indisvalid, false) as done,\n    CASE \n        WHEN p.blocks_total > 0 THEN p.blocks_done * 100 / p.blocks_total\n        ELSE 0\n    END as progress\nFROM pg_class c\nJOIN pg_namespace n ON c.relnamespace = n.oid\nLEFT JOIN pg_index i ON c.oid = i.indexrelid\nLEFT JOIN pg_stat_progress_create_index p ON c.oid = p.index_relid\nWHERE c.relname = 'events_account_idx_pgschema_new'\n  AND n.nspname = 'public';",
+          "directive": {
+            "type": "wait",
+            "message": "Creating index events_account_idx_pgschema_new"
+          },
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.events.events_account_idx"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "DROP INDEX IF EXISTS events_account_idx;",
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.events.events_account_idx"
+        },
+        {
+          "sql": "ALTER INDEX events_account_idx_pgschema_new RENAME TO events_account_idx;",
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.events.events_account_idx"
+        },
+        {
+          "sql": "ALTER TABLE ledgers ALTER COLUMN ref TYPE bigint USING ref::bigint;",
+          "type": "table.column",
+          "operation": "alter",
+          "path": "public.ledgers.ref"
+        },
+        {
+          "sql": "ALTER TABLE ledgers DROP CONSTRAINT ledgers_ref_check;",
+          "type": "table.constraint",
+          "operation": "drop",
+          "path": "public.ledgers.ledgers_ref_check"
+        },
+        {
+          "sql": "ALTER TABLE ledgers\nADD CONSTRAINT ledgers_ref_check CHECK (ref > 10) NOT VALID;",
+          "type": "table.constraint",
+          "operation": "create",
+          "path": "public.ledgers.ledgers_ref_check"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "ALTER TABLE ledgers VALIDATE CONSTRAINT ledgers_ref_check;",
+          "type": "table.constraint",
+          "operation": "create",
+          "path": "public.ledgers.ledgers_ref_check"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS ledgers_ref_key_pgschema_new ON ledgers (ref, id);",
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.ledgers.ledgers_ref_key"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "SELECT \n    COALESCE(i.indisvalid, false) as done,\n    CASE \n        WHEN p.blocks_total > 0 THEN p.blocks_done * 100 / p.blocks_total\n        ELSE 0\n    END as progress\nFROM pg_class c\nJOIN pg_namespace n ON c.relnamespace = n.oid\nLEFT JOIN pg_index i ON c.oid = i.indexrelid\nLEFT JOIN pg_stat_progress_create_index p ON c.oid = p.index_relid\nWHERE c.relname = 'ledgers_ref_key_pgschema_new'\n  AND n.nspname = 'public';",
+          "directive": {
+            "type": "wait",
+            "message": "Creating index ledgers_ref_key_pgschema_new"
+          },
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.ledgers.ledgers_ref_key"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "DROP INDEX IF EXISTS ledgers_ref_key;",
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.ledgers.ledgers_ref_key"
+        },
+        {
+          "sql": "ALTER INDEX ledgers_ref_key_pgschema_new RENAME TO ledgers_ref_key;",
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.ledgers.ledgers_ref_key"
+        },
+        {
+          "sql": "ALTER TABLE tasks ALTER COLUMN c TYPE text USING c::text;",
+          "type": "table.column",
+          "operation": "alter",
+          "path": "public.tasks.c"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "CREATE INDEX CONCURRENTLY IF NOT EXISTS tasks_c_idx_pgschema_new ON tasks (c, id) WHERE (d <> 'x'::phase);",
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.tasks.tasks_c_idx"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "SELECT \n    COALESCE(i.indisvalid, false) as done,\n    CASE \n        WHEN p.blocks_total > 0 THEN p.blocks_done * 100 / p.blocks_total\n        ELSE 0\n    END as progress\nFROM pg_class c\nJOIN pg_namespace n ON c.relnamespace = n.oid\nLEFT JOIN pg_index i ON c.oid = i.indexrelid\nLEFT JOIN pg_stat_progress_create_index p ON c.oid = p.index_relid\nWHERE c.relname = 'tasks_c_idx_pgschema_new'\n  AND n.nspname = 'public';",
+          "directive": {
+            "type": "wait",
+            "message": "Creating index tasks_c_idx_pgschema_new"
+          },
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.tasks.tasks_c_idx"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "DROP INDEX IF EXISTS tasks_c_idx;",
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.tasks.tasks_c_idx"
+        },
+        {
+          "sql": "ALTER INDEX tasks_c_idx_pgschema_new RENAME TO tasks_c_idx;",
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.tasks.tasks_c_idx"
+        },
+        {
+          "sql": "ALTER TABLE tickets ALTER COLUMN state TYPE text USING state::text;",
+          "type": "table.column",
+          "operation": "alter",
+          "path": "public.tickets.state"
+        },
+        {
+          "sql": "ALTER TABLE tickets DROP CONSTRAINT tickets_state_check;",
+          "type": "table.constraint",
+          "operation": "drop",
+          "path": "public.tickets.tickets_state_check"
+        },
+        {
+          "sql": "ALTER TABLE tickets\nADD CONSTRAINT tickets_state_check CHECK (state <> ''::text AND n > 0) NOT VALID;",
+          "type": "table.constraint",
+          "operation": "create",
+          "path": "public.tickets.tickets_state_check"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "ALTER TABLE tickets VALIDATE CONSTRAINT tickets_state_check;",
+          "type": "table.constraint",
+          "operation": "create",
+          "path": "public.tickets.tickets_state_check"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS tickets_state_n_key_pgschema_new ON tickets (state, n, id);",
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.tickets.tickets_state_n_key"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "SELECT \n    COALESCE(i.indisvalid, false) as done,\n    CASE \n        WHEN p.blocks_total > 0 THEN p.blocks_done * 100 / p.blocks_total\n        ELSE 0\n    END as progress\nFROM pg_class c\nJOIN pg_namespace n ON c.relnamespace = n.oid\nLEFT JOIN pg_index i ON c.oid = i.indexrelid\nLEFT JOIN pg_stat_progress_create_index p ON c.oid = p.index_relid\nWHERE c.relname = 'tickets_state_n_key_pgschema_new'\n  AND n.nspname = 'public';",
+          "directive": {
+            "type": "wait",
+            "message": "Creating index tickets_state_n_key_pgschema_new"
+          },
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.tickets.tickets_state_n_key"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "DROP INDEX IF EXISTS tickets_state_n_key;",
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.tickets.tickets_state_n_key"
+        },
+        {
+          "sql": "ALTER INDEX tickets_state_n_key_pgschema_new RENAME TO tickets_state_n_key;",
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.tickets.tickets_state_n_key"
+        },
+        {
+          "sql": "ALTER TABLE users ALTER COLUMN code TYPE varchar(20);",
+          "type": "table.column",
+          "operation": "alter",
+          "path": "public.users.code"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS users_code_key_pgschema_new ON users (code) WHERE ((code)::text <> ''::text);",
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.users.users_code_key"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "SELECT \n    COALESCE(i.indisvalid, false) as done,\n    CASE \n        WHEN p.blocks_total > 0 THEN p.blocks_done * 100 / p.blocks_total\n        ELSE 0\n    END as progress\nFROM pg_class c\nJOIN pg_namespace n ON c.relnamespace = n.oid\nLEFT JOIN pg_index i ON c.oid = i.indexrelid\nLEFT JOIN pg_stat_progress_create_index p ON c.oid = p.index_relid\nWHERE c.relname = 'users_code_key_pgschema_new'\n  AND n.nspname = 'public';",
+          "directive": {
+            "type": "wait",
+            "message": "Creating index users_code_key_pgschema_new"
+          },
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.users.users_code_key"
+        }
+      ]
+    },
+    {
+      "steps": [
+        {
+          "sql": "DROP INDEX IF EXISTS users_code_key;",
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.users.users_code_key"
+        },
+        {
+          "sql": "ALTER INDEX users_code_key_pgschema_new RENAME TO users_code_key;",
+          "type": "table.index",
+          "operation": "alter",
+          "path": "public.users.users_code_key"
+        }
+      ]
+    }
+  ]
+}
